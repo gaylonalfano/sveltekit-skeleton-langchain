@@ -1,10 +1,11 @@
 import { OPENAI_API_KEY } from '$env/static/private'
-import type { 
-  RequestHandler, 
-  RequestEvent, 
+import type {
+  RequestHandler,
+  RequestEvent,
 } from '@sveltejs/kit';
 import { json, error } from '@sveltejs/kit';
 import { ChatOpenAI } from "langchain/chat_models";
+import { OpenAIChat } from 'langchain/llms';
 import { AgentExecutor, ChatAgent } from "langchain/agents";
 import {
   ChatPromptTemplate,
@@ -15,28 +16,39 @@ import {
 import { ConversationChain } from "langchain/chains";
 import { CallbackManager } from 'langchain/callbacks';
 import { BufferMemory } from "langchain/memory";
-import type { LLMResult } from 'langchain/schema';
+import { HumanChatMessage, type LLMResult } from 'langchain/schema';
 import { SerpAPI } from "langchain/tools";
+// import { OpenAIChat } from 'langchain/dist/llms';
 
-
-// export const config: Config = {
-//   runtime: 'nodejs18.x'
-// }
 
 export const GET = (({ url }) => {
   const min = Number(url.searchParams.get('min') ?? '0');
   const max = Number(url.searchParams.get('max') ?? '1');
- 
+
   const d = max - min;
- 
+
   if (isNaN(d) || d < 0) {
     throw error(400, 'min and max must be numbers, and min must be less than max');
   }
- 
+
   const random = min + Math.random() * d;
- 
+
   return new Response(String(random));
 }) satisfies RequestHandler;
+
+
+// export async function POST({ request }: RequestEvent) {
+//   // Parse the JSON out of the response body
+//   const body = await request.json();
+//   const authHeader = request.headers.get('Authorization');
+
+//   if (authHeader !== 'MyAuthHeader') {
+//     return new Response(JSON.stringify({ message: "Invalid credentials!" }), { status: 401 });
+//   }
+
+//   return new Response(JSON.stringify({ message: "POST request received!" }), { status: 201 });
+// }
+
 
 // REF: https://github.com/hwchase17/langchainjs/blob/main/examples/src/chat/overview.ts
 export const POST = (async ({ request }: RequestEvent) => {
@@ -45,10 +57,10 @@ export const POST = (async ({ request }: RequestEvent) => {
       throw new Error('OPENAI_API_KEY env variable not set')
     }
 
-    const requestData = await request.json()
-    console.log('requestData: ', requestData);
+    const body = await request.json()
+    console.log('body: ', body);
 
-    if (!requestData) {
+    if (!body) {
       throw new Error('No request data')
     }
 
@@ -59,7 +71,7 @@ export const POST = (async ({ request }: RequestEvent) => {
     // }
 
     // OpenAI recommends replacing newlines with spaces for best results
-    // const sanitizedQuestion = requestData.query.trim().replaceAll('\n', ' ');
+    // const sanitizedQuestion = body.query.trim().replaceAll('\n', ' ');
 
     // ---------
     // NOTE Taken from langchain 'openai-chat streaming' test
@@ -93,7 +105,23 @@ export const POST = (async ({ request }: RequestEvent) => {
     };
     let streamedCompletion = "";
 
-    const model = new ChatOpenAI({
+    // function sendData(chunk: string) {
+    //   data += JSON.stringify({ data: chunk })
+    // }
+
+    // ----- REF: NextJS
+    // Need to make the equivalent of NextJS:
+    // const sendData = (data: string) => {
+    //   res.write(`data: ${data}\n\n`);
+    // }
+    // NOTE: This is used to sendData for each 'token'
+    // in the callback handleLLMNewToken():
+    // sendData(JSON.stringify({ data: token }))
+    // -----
+    // let data = '';
+  
+    // Q: ChatOpenAI() or OpenAIChat()? NextJS examples are OpenAIChat()
+    const model = new OpenAIChat({
       // maxTokens: 10, 
       openAIApiKey: OPENAI_API_KEY,
       modelName: "gpt-3.5-turbo",
@@ -105,9 +133,11 @@ export const POST = (async ({ request }: RequestEvent) => {
           console.log({ token });
           tokenUsage.totalTokens += 1;
           streamedCompletion += token;
+          // data += JSON.stringify({ data: token }) + '\n\n'
+          // console.log({ data });
         },
         async handleLLMEnd(output: LLMResult) {
-          console.log({ output });
+          // console.log({ output });
           // { output: { generations: [ [Array] ], llmOutput: undefined } }
           // output.generations.forEach(g => console.log(g))
           // [
@@ -116,6 +146,7 @@ export const POST = (async ({ request }: RequestEvent) => {
           //     message: AIChatMessage { text: 'Blue in Mandarin is 蓝色 (lán sè).' }
           //   }
           // ]
+          console.log(JSON.stringify(output, null, 2));
           // Q: Should I be adding these generations Array to the Response
           // somehow? Wouldn't this be appended to 'history' or something?
           tokenUsage = output.llmOutput?.tokenUsage;
@@ -163,6 +194,7 @@ export const POST = (async ({ request }: RequestEvent) => {
       llm: model,
       prompt: prompt,
       memory: new BufferMemory({
+        // chatHistory: body.history,
         returnMessages: true,
         memoryKey: "history",
         inputKey: "question",
@@ -172,8 +204,8 @@ export const POST = (async ({ request }: RequestEvent) => {
     console.log('chain: ', chain);
 
     // const chainResponse = await llmChain.call({
-    //   question: requestData.question,
-    //   history: requestData.history || []
+    //   question: body.question,
+    //   history: body.history || []
     // })
     // console.log('chainResponse: ', chainResponse);
 
@@ -181,10 +213,8 @@ export const POST = (async ({ request }: RequestEvent) => {
     // Now we're ready to send over to the LLM for processing
     // based on user input, which has been formatted to the prompt
     const chainResponse = await chain.call({
-      // question: requestData,
-      // history: "Chat history..."
-      question: requestData.question,
-      history: requestData.history
+      history: body.history,
+      question: body.question
     });
     console.log('chainResponse: ', chainResponse);
     // chainResponse:  { response: 'Yellow in Mandarin is 黄色 (huáng sè).' }
@@ -237,14 +267,16 @@ export const POST = (async ({ request }: RequestEvent) => {
     // - response2 (QAChain LLMResult)
     const data = {
       chainResponse,
-    }
-    return new Response(JSON.stringify(data), {
-        headers: {
-          'Content-Type': 'text/event-stream',
-          // 'Cache-Control': 'no-cache, no-transform',
-          // Connection: 'keep-alive',
-        }
-    })
+    } // Nope
+    // return new Response(JSON.stringify({ data: 'Hello!' }))
+    return new Response(JSON.stringify({ event: 'message', data }))
+    // return new Response(JSON.stringify(data), {
+    //   headers: {
+    //     'Content-Type': 'text/event-stream',
+    //     'Cache-Control': 'no-cache, no-transform',
+    //     Connection: 'keep-alive',
+    //   }
+    // })
 
   } catch (err) {
     console.error(err)

@@ -11,13 +11,17 @@
 		Generation
 	} from 'langchain/schema';
 	import { fetchEventSource } from '@microsoft/fetch-event-source';
-	import { chatStateStore } from '$lib/stores/chat-state-store';
+	import { messageStateStore } from '$lib/stores/message-state-store';
 	// import { onMount } from 'svelte'
 
-  // ====== IMPORTANT =======
-  // Just TOO many issues getting going with SK where the real goal is
-  // learning how to use LangChain with various models. Time to start
-  // learning a bit of React/NextJS I guess...
+	// ====== IMPORTANT =======
+	// Just TOO many issues getting going with SK where the real goal is
+	// learning how to use LangChain with various models. Time to start
+	// learning a bit of React/NextJS I guess...
+
+  // TODOS/QUESTIONS:
+  // - Q: How to get SSE event Responses sent to Client?
+  //      This is THE thing that's preventing me from using LC+SK
 
 	// Q: How to add a speech-to-text using Whisper API?
 	// Saving to MP3: REF: https://medium.com/jeremy-gottfrieds-tech-blog/javascript-tutorial-record-audio-and-encode-it-to-mp3-2eedcd466e78
@@ -32,25 +36,16 @@
 	// Q: What's the LC type equivalent of ChatCompletionRequestMessage?
 	// BaseChatMessage, ChatResult, ChainValues, ChatGeneration?
 	// Q: Do I create a custom Type like toly?
-	type ChatMessageObject = {
-		type: MessageType;
-		message: string;
-		isStreaming?: boolean;
-	};
 
 	let query: string = '';
-	let answer: string = '';
 	let loading: boolean = false;
-	let chatMessages: ChatMessageObject[] = [];
-	let chatHistory: [string, string][] = [];
+	let sourceDocs: Document[] = [];
+	let error: string | null = null;
 	let scrollToDiv: HTMLDivElement;
 	$: question = query.trim();
 
 	$: {
-		console.log('chatStateStore: ', chatStateStore);
-		console.log('answer: ', answer);
-		console.log('chatMessages: ', chatMessages);
-		console.log('chatHistory: ', chatStateStore);
+		console.log('messageStateStore: ', $messageStateStore);
 	}
 
 	// ====== Testing out Types:
@@ -72,7 +67,6 @@
 		}, 100);
 	}
 
-	// ========= fetch-event-source =====
 	async function handleSubmit(event: SubmitEvent) {
 		console.log('handleSubmit() event: ', event);
 		// let question = new HumanChatMessage(query.trim())
@@ -82,90 +76,101 @@
 			alert('Please enter a question.');
 			return;
 		}
+		console.log('question: ', question);
 		// Update state
-		chatMessages = [...chatMessages, { type: 'human', message: question }];
-		chatStateStore.update((store) => {
+		messageStateStore.update((store) => {
 			return {
 				...store,
 				messages: [
 					...store.messages,
 					{
-						type: 'human',
+						type: 'userMessage',
 						message: question
 					}
 				],
 				pending: undefined
 			};
 		});
-		// console.log('UPDATED::chatStateStore: ', $chatStateStore)
+		console.log('UPDATED::messageStateStore: ', $messageStateStore);
 		loading = true;
 		query = '';
 		// Q: Do I do another store.update() to set pending: ''?
-		chatStateStore.update((store) => ({ ...store, pending: '' }));
-		console.log('UPDATED::chatStateStore: ', $chatStateStore);
-		console.log('JSON.stringify body: ', JSON.stringify({ question, history: chatHistory }));
+		messageStateStore.update((store) => ({ ...store, pending: '' }));
+		console.log('UPDATED::messageStateStore: ', $messageStateStore);
+		console.log(
+			'JSON.stringify({q,h}): ',
+			JSON.stringify({ question, history: $messageStateStore.history })
+		);
 
 		const ctrl = new AbortController();
 
+		// NOTE Differences between Postman and Home page REQUESTS:
+		// NOTE All Body is JSON.stringified syntax:
+		// Postman Request Body: {"messages":[{"role":"user","content":"How to say hello?"}]}
+		// +server.ts::requestData:  { messages: [ { role: 'user', content: 'How to say hello?' } ] }
+		// Home page Request Body: {"question":"How to say yellow?","history":[]}
+		// +server.ts::requestData:  { question: 'How to say yellow?', history: [] }
+		// NEXTJS Home Request.body JSON.str({q,h}): {"question":"How are you?","history":[]}
+		// NEXTJS server response: { response: "Searching 2021 annual report..." }
+
 		try {
-			console.log('Calling fetchEventSource()...');
-			await fetchEventSource('/api/langchain', {
+			fetchEventSource('/api/chat', {
 				method: 'POST',
 				headers: {
 					'Content-Type': 'application/json'
 				},
 				body: JSON.stringify({
 					question,
-					history: $chatStateStore.history
+					history: $messageStateStore.history
 					// history: chatHistory
 				}),
 				signal: ctrl.signal,
-				onmessage: (ev) => {
-					console.log('onmessage event.data: ', ev.data);
+				onmessage: (event) => {
+					console.log('onmessage event.data: ', event);
 					scrollToBottom();
-					if (ev.data === '[DONE]') {
+					if (event.data === '[DONE]') {
 						// Q: Eventually need to save state. Could consider a
 						// PageServerLoad from Supabase then it'd be in 'data' prop
 						// Q: Use a Store for state?
-						chatMessages = [
-							...chatMessages,
-							{ type: 'ai', message: $chatStateStore.pending ?? '' }
-						];
-						chatHistory = [...chatHistory, [question, $chatStateStore.pending ?? '']];
-						chatStateStore.update((store) => {
+						messageStateStore.update((store) => {
 							return {
+								history: [...store.history, [question, store.pending ?? '']],
 								messages: [
 									...store.messages,
 									{
-										type: 'ai',
-										message: store.pending ?? ''
+										type: 'apiMessage',
+										message: store.pending ?? '',
+										sourceDocs: store.pendingSourceDocs
 									}
 								],
-								history: [...store.history, [question, store.pending ?? '']],
-								pending: undefined
+								pending: undefined,
+								pendingSourceDocs: undefined
 							};
 						});
-						console.log('DONE::chatStateStore: ', $chatStateStore);
-						answer = '';
+						console.log('DONE::messageStateStore: ', $messageStateStore);
 						loading = false;
 						ctrl.abort();
 					} else {
-						const data = JSON.parse(ev.data);
+						const data = JSON.parse(event.data);
 						console.log('e.data: ', data);
 						// Q: Do I need 'answer'? Should it be: ???
-						answer = (answer ?? '') + data.data;
-						console.log('answer: ', answer);
-
+						// answer = (answer ?? '') + data.data;
 						// Q: What about 'history'?
-						chatMessages = [...chatMessages, { type: 'ai', message: answer }];
-						chatHistory = [...chatHistory, [question, answer]];
-						chatStateStore.update((store) => {
-							// NOTE Spread into Object
-							return {
-								...store,
-								pending: (store.pending ?? '') + data.data
-							};
-						});
+						if (data.sourceDocs) {
+							messageStateStore.update((store) => {
+								return {
+									...store,
+									pendingSourceDocs: data.sourceDocs
+								};
+							});
+						} else {
+							messageStateStore.update((store) => {
+								return {
+									...store,
+									pending: (store.pending ?? '') + data.data
+								};
+							});
+						}
 						scrollToBottom();
 					}
 				}
@@ -178,7 +183,6 @@
 	function handleError<T>(err: T) {
 		loading = false;
 		query = '';
-		answer = '';
 		console.error(err);
 	}
 </script>
@@ -217,12 +221,11 @@
 			<form on:submit|preventDefault={handleSubmit} class="space-y-4">
 				<div class="input-group input-group-divider grid-cols-[auto_1fr_auto]">
 					<div class="input-group-shim">💀</div>
-					<input type="search" placeholder="Search..." />
+					<input type="search" bind:value={query} placeholder="How can I help you?" />
 					<button type="submit" class="variant-filled-secondary">Submit</button>
 				</div>
 			</form>
+			<pre>{JSON.stringify($messageStateStore, null, 2)}</pre>
 		</div>
 	</div>
 </div>
-
-<pre>{JSON.stringify($chatStateStore, null, 2)}</pre>
